@@ -1,6 +1,8 @@
 {
   "name": "facturestock",
   "version": "1.0.0",
+  "description": "Logiciel de facturation et gestion de stock pour le Maroc (MAD, TVA)",
+  "author": "FactureStock",
   "private": true,
   "main": "electron/main.js",
   "packageManager": "pnpm@10.33.4",
@@ -115,6 +117,7 @@
     "appId": "ma.facturestock.app",
     "productName": "FactureStock",
     "copyright": "Copyright © 2025 FactureStock",
+    "icon": "public/icon.ico",
     "asar": true,
     "asarUnpack": [
       "node_modules/better-sqlite3/**/*",
