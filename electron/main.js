@@ -12,64 +12,88 @@ let mainWindow
 let nextServer
 let tray
 
-// ─── Embedded Node.js path (Electron ships its own Node runtime) ─────────────
-// process.execPath = path to the Electron binary which IS a full Node.js runtime.
-// We use it to spawn `next start` without needing any external Node installation.
-function getNodeBin() {
-  // In packaged app: process.execPath is FactureStock.exe (Electron = Node)
-  // In dev: just use whatever node is on PATH (should exist for dev)
-  return process.execPath
-}
-
-// ─── Get local IP address ─────────────────────────────────────────────────────
+// ─── Local IP ─────────────────────────────────────────────────────────────────
 function getLocalIP() {
-  const interfaces = os.networkInterfaces()
-  for (const name of Object.keys(interfaces)) {
-    for (const iface of interfaces[name]) {
-      if (iface.family === 'IPv4' && !iface.internal) {
-        return iface.address
-      }
+  const ifaces = os.networkInterfaces()
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address
     }
   }
   return 'localhost'
 }
 
-// ─── Start Next.js server using Electron's built-in Node.js ──────────────────
-// This is the key to being STANDALONE — no external Node.js needed on Windows.
-// Electron bundles Node.js internally; we reuse its binary to run `next start`.
+// ─── Start Next.js standalone server ─────────────────────────────────────────
+//
+// next build --output standalone produces:
+//   .next/standalone/server.js      ← minimal Node.js HTTP server, no node_modules needed
+//   .next/standalone/node_modules/  ← only runtime deps (auto-copied by Next.js)
+//   .next/standalone/.next/         ← server chunks
+//
+// We also copy into standalone/:
+//   .next/static/   → .next/standalone/.next/static/   (static assets)
+//   public/         → .next/standalone/public/          (public files)
+//
+// Electron's own Node.js runtime (process.execPath) runs server.js directly.
+// Zero external Node.js installation needed on the Windows target machine.
+//
 function startNextServer() {
   return new Promise((resolve, reject) => {
-    if (IS_DEV) {
-      // In dev mode, Next.js dev server is already running separately
-      resolve()
-      return
-    }
+    if (IS_DEV) { resolve(); return }
 
-    // In packaged app: app files live inside the asar at resources/app.asar
-    // but node_modules/.bin and next are accessible via process.resourcesPath
-    const appDir = path.join(process.resourcesPath, 'app.asar')
-    const nextBin = path.join(process.resourcesPath, 'app.asar', 'node_modules', 'next', 'dist', 'bin', 'next')
+    // In packaged asar the standalone dir is at resources/app.asar/.next/standalone
+    // better-sqlite3 .node binary is in asarUnpack so it's outside the asar
+    const standaloneDir = path.join(process.resourcesPath, 'app.asar', '.next', 'standalone')
+    const serverScript = path.join(standaloneDir, 'server.js')
 
-    // Data directory in user's AppData (persists across updates)
+    // Persistent user data directory (survives app updates)
     const dataDir = path.join(app.getPath('userData'), 'FactureStock')
     if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true })
 
-    process.env.DATA_DIR = dataDir
-    process.env.PORT = String(PORT)
-    process.env.NODE_ENV = 'production'
-    process.env.HOSTNAME = '0.0.0.0'
-    process.env.NEXT_TELEMETRY_DISABLED = '1'
+    // Initialize database on first run
+    const dbPath = path.join(dataDir, 'facturestock.db')
+    const migrateScript = path.join(process.resourcesPath, 'app.asar', 'db', 'migrate-standalone.js')
 
-    console.log('[FactureStock] Starting Next.js server...')
-    console.log('[FactureStock] Node binary:', getNodeBin())
-    console.log('[FactureStock] App dir:', appDir)
+    // Environment for the server process
+    const serverEnv = {
+      ...process.env,
+      DATA_DIR: dataDir,
+      PORT: String(PORT),
+      HOSTNAME: '0.0.0.0',
+      NODE_ENV: 'production',
+      NEXT_TELEMETRY_DISABLED: '1',
+      // Point better-sqlite3 to the unpacked native binary
+      // electron-builder asarUnpack copies it to app.asar.unpacked/
+      BETTER_SQLITE3_PATH: path.join(
+        process.resourcesPath,
+        'app.asar.unpacked',
+        'node_modules',
+        'better-sqlite3',
+        'build',
+        'Release',
+        'better_sqlite3.node'
+      ),
+    }
+
+    console.log('[FactureStock] Standalone dir:', standaloneDir)
+    console.log('[FactureStock] Server script:', serverScript)
     console.log('[FactureStock] Data dir:', dataDir)
+    console.log('[FactureStock] Node binary:', process.execPath)
 
-    nextServer = spawn(getNodeBin(), [nextBin, 'start', '-p', String(PORT), '-H', '0.0.0.0'], {
-      cwd: path.join(process.resourcesPath, 'app.asar'),
-      env: { ...process.env },
+    if (!fs.existsSync(serverScript)) {
+      reject(new Error(
+        `server.js introuvable dans:\n${standaloneDir}\n\n` +
+        `Assurez-vous d'avoir lancé: pnpm build\n` +
+        `(next build génère .next/standalone/server.js)`
+      ))
+      return
+    }
+
+    // Run the standalone server with Electron's built-in Node.js
+    nextServer = spawn(process.execPath, [serverScript], {
+      cwd: standaloneDir,
+      env: serverEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
-      // Windows: hide the console window
       windowsHide: true,
     })
 
@@ -81,14 +105,9 @@ function startNextServer() {
       const msg = d.toString().trim()
       if (msg) console.error('[Next err]', msg)
     })
-    nextServer.on('error', err => {
-      console.error('[Next spawn error]', err)
-      reject(err)
-    })
-    nextServer.on('exit', (code) => {
-      if (code !== 0 && code !== null) {
-        console.error('[Next exited with code]', code)
-      }
+    nextServer.on('error', err => { console.error('[spawn error]', err); reject(err) })
+    nextServer.on('exit', code => {
+      if (code !== 0 && code !== null) console.error('[Next exit code]', code)
     })
 
     waitForServer(resolve, reject, 90)
@@ -97,12 +116,12 @@ function startNextServer() {
 
 function waitForServer(resolve, reject, retries) {
   if (retries <= 0) {
-    reject(new Error('Le serveur Next.js n\'a pas démarré dans les temps.\nVérifiez que le port 13000 est libre.'))
+    reject(new Error('Le serveur Next.js n\'a pas démarré (timeout 90s).\nPort 13000 peut-être occupé.'))
     return
   }
-  http.get(`http://localhost:${PORT}/api/health`, (res) => {
+  http.get(`http://localhost:${PORT}/api/health`, res => {
     if (res.statusCode === 200) {
-      console.log('[FactureStock] Server ready on port', PORT)
+      console.log('[FactureStock] Server ready ✓')
       resolve()
     } else {
       setTimeout(() => waitForServer(resolve, reject, retries - 1), 1000)
@@ -112,180 +131,109 @@ function waitForServer(resolve, reject, retries) {
   })
 }
 
-// ─── System tray icon ─────────────────────────────────────────────────────────
+// ─── Tray ─────────────────────────────────────────────────────────────────────
 function createTray(localIP) {
-  // Try to load icon; fallback to empty
   let icon
   try {
-    const iconPath = path.join(__dirname, '..', 'public', 'icon.ico')
-    if (fs.existsSync(iconPath)) {
-      icon = nativeImage.createFromPath(iconPath)
-    } else {
-      icon = nativeImage.createEmpty()
-    }
-  } catch {
-    icon = nativeImage.createEmpty()
-  }
+    const iconPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'app.asar', 'public', 'icon.ico')
+      : path.join(__dirname, '..', 'public', 'icon.ico')
+    icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty()
+  } catch { icon = nativeImage.createEmpty() }
 
   tray = new Tray(icon)
-
   const menu = Menu.buildFromTemplate([
-    { label: 'FactureStock — Serveur actif', enabled: false },
+    { label: 'FactureStock — Actif ✓', enabled: false },
     { type: 'separator' },
-    { label: `📍 Local : http://localhost:${PORT}`, enabled: false },
-    { label: `🌐 Réseau : http://${localIP}:${PORT}`, enabled: false },
+    { label: `📍 http://localhost:${PORT}`, enabled: false },
+    { label: `🌐 http://${localIP}:${PORT}`, enabled: false },
     { type: 'separator' },
+    { label: 'Ouvrir', click: () => mainWindow ? (mainWindow.show(), mainWindow.focus()) : createWindow(localIP) },
     {
-      label: 'Ouvrir FactureStock',
-      click: () => {
-        if (mainWindow) { mainWindow.show(); mainWindow.focus() }
-        else createWindow(localIP)
-      },
-    },
-    {
-      label: 'Copier l\'adresse réseau',
-      click: () => {
+      label: 'Copier adresse réseau', click: () => {
         clipboard.writeText(`http://${localIP}:${PORT}`)
-        dialog.showMessageBox({
-          message: `Adresse copiée !\nhttp://${localIP}:${PORT}`,
-          type: 'info', title: 'FactureStock'
-        })
-      },
+        dialog.showMessageBox({ message: `Copié !\nhttp://${localIP}:${PORT}`, type: 'info', title: 'FactureStock' })
+      }
     },
     { type: 'separator' },
-    {
-      label: 'Quitter FactureStock',
-      click: () => {
-        if (nextServer) nextServer.kill()
-        app.quit()
-      },
-    },
+    { label: 'Quitter', click: () => { if (nextServer) nextServer.kill(); app.quit() } },
   ])
-
   tray.setContextMenu(menu)
   tray.setToolTip(`FactureStock — http://${localIP}:${PORT}`)
-
-  tray.on('double-click', () => {
-    if (mainWindow) { mainWindow.show(); mainWindow.focus() }
-    else createWindow(localIP)
-  })
+  tray.on('double-click', () => mainWindow ? (mainWindow.show(), mainWindow.focus()) : createWindow(localIP))
 }
 
-// ─── Create main window ───────────────────────────────────────────────────────
+// ─── Main window ──────────────────────────────────────────────────────────────
 function createWindow(localIP) {
   const ip = localIP || getLocalIP()
-
   mainWindow = new BrowserWindow({
-    width: 1300,
-    height: 860,
-    minWidth: 960,
-    minHeight: 640,
+    width: 1300, height: 860, minWidth: 960, minHeight: 640,
     title: 'FactureStock',
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
+      nodeIntegration: false, contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
     },
-    show: false,
-    backgroundColor: '#f8fafc',
-    autoHideMenuBar: true,
+    show: false, backgroundColor: '#f8fafc', autoHideMenuBar: true,
   })
-
-  // Remove default menu bar (File/Edit/View...)
   mainWindow.removeMenu()
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
-    return { action: 'deny' }
-  })
-
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' } })
   mainWindow.loadURL(`http://localhost:${PORT}`)
-
   mainWindow.once('ready-to-show', () => {
-    mainWindow.show()
-    mainWindow.focus()
-
-    // Show LAN info banner in the app
+    mainWindow.show(); mainWindow.focus()
     if (!IS_DEV) {
       setTimeout(() => {
         mainWindow.webContents.executeJavaScript(`
           (() => {
-            if (document.getElementById('fs-network-banner')) return
+            if (document.getElementById('fs-net')) return
             const b = document.createElement('div')
-            b.id = 'fs-network-banner'
-            b.style.cssText = 'position:fixed;bottom:16px;right:16px;background:#0f172a;color:white;padding:10px 16px;border-radius:10px;font-size:12px;z-index:9999;font-family:sans-serif;box-shadow:0 4px 20px rgba(0,0,0,0.3);cursor:pointer;max-width:280px;'
-            b.innerHTML = '<div style="font-weight:700;margin-bottom:4px">🌐 Serveur actif sur le réseau</div><div style="color:#94a3b8">Autres PC : <span style="color:#60a5fa;font-weight:600">http://${ip}:${PORT}</span></div><div style="color:#475569;font-size:10px;margin-top:4px">Cliquez pour fermer</div>'
-            b.onclick = () => b.remove()
+            b.id = 'fs-net'
+            b.style.cssText='position:fixed;bottom:16px;right:16px;background:#0f172a;color:#fff;padding:10px 16px;border-radius:10px;font-size:12px;z-index:9999;font-family:sans-serif;box-shadow:0 4px 20px rgba(0,0,0,.35);cursor:pointer;max-width:280px'
+            b.innerHTML='<div style="font-weight:700;margin-bottom:4px">🌐 Serveur actif sur le réseau</div><div style="color:#94a3b8">Autres PC : <span style="color:#60a5fa;font-weight:600">http://${ip}:${PORT}</span></div><div style="color:#475569;font-size:10px;margin-top:4px">Clic pour fermer</div>'
+            b.onclick=()=>b.remove()
             document.body.appendChild(b)
-            setTimeout(() => { if(b.parentNode) b.remove() }, 12000)
+            setTimeout(()=>{if(b.parentNode)b.remove()},12000)
           })()
         `).catch(() => {})
       }, 2500)
     }
   })
-
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
-// ─── Splash screen ────────────────────────────────────────────────────────────
+// ─── Splash ───────────────────────────────────────────────────────────────────
 function createSplash() {
-  const splash = new BrowserWindow({
-    width: 440, height: 300,
-    frame: false,
-    alwaysOnTop: true,
-    backgroundColor: '#0f172a',
-    resizable: false,
-    center: true,
-    skipTaskbar: true,
+  const w = new BrowserWindow({
+    width: 440, height: 300, frame: false, alwaysOnTop: true,
+    backgroundColor: '#0f172a', resizable: false, center: true, skipTaskbar: true,
   })
-
-  splash.loadURL(`data:text/html;charset=utf-8,<!DOCTYPE html>
-<html lang="fr">
-<head><meta charset="utf-8">
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body {
-    background:#0f172a; display:flex; flex-direction:column;
-    align-items:center; justify-content:center; height:100vh;
-    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-    color:white; padding:30px;
-  }
-  .logo { width:70px;height:70px;background:#1a56db;border-radius:18px;
-    display:flex;align-items:center;justify-content:center;
-    font-size:36px;font-weight:800;margin-bottom:18px;
-    box-shadow:0 8px 32px rgba(26,86,219,0.4); }
-  h1 { font-size:26px;font-weight:800;margin-bottom:6px; }
-  .sub { font-size:13px;color:#64748b;margin-bottom:6px; }
-  .subtitle { font-size:12px;color:#475569;margin-bottom:28px; }
-  .bar-wrap { width:260px;height:5px;background:#1e293b;border-radius:3px;overflow:hidden;margin-bottom:18px; }
-  .bar { height:100%;background:linear-gradient(90deg,#1a56db,#3b82f6);
-    border-radius:3px;animation:pulse 1.4s ease-in-out infinite alternate; }
-  .info { font-size:11px;color:#334155;text-align:center;line-height:1.6; }
-  .badge { display:inline-block;background:#1e293b;color:#60a5fa;
-    padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;margin-top:6px; }
-  @keyframes pulse { from{opacity:0.6;transform:scaleX(0.7)} to{opacity:1;transform:scaleX(1)} }
-</style>
-</head>
-<body>
-  <div class="logo">F</div>
-  <h1>FactureStock</h1>
-  <div class="sub">Gestion commerciale — Maroc</div>
-  <div class="subtitle">Démarrage du serveur intégré...</div>
-  <div class="bar-wrap"><div class="bar"></div></div>
-  <div class="info">
-    Node.js intégré — Aucune installation requise<br>
-    <span class="badge">Standalone · Windows x64</span>
-  </div>
-</body>
-</html>`)
-
-  return splash
+  w.loadURL(`data:text/html;charset=utf-8,<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f172a;display:flex;flex-direction:column;align-items:center;justify-content:center;
+height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#fff;padding:30px}
+.logo{width:70px;height:70px;background:#1a56db;border-radius:18px;display:flex;align-items:center;
+justify-content:center;font-size:36px;font-weight:800;margin-bottom:18px;box-shadow:0 8px 32px rgba(26,86,219,.4)}
+h1{font-size:26px;font-weight:800;margin-bottom:6px}
+.sub{font-size:13px;color:#64748b;margin-bottom:24px}
+.bar{width:260px;height:5px;background:#1e293b;border-radius:3px;overflow:hidden;margin-bottom:20px}
+.fill{height:100%;background:linear-gradient(90deg,#1a56db,#3b82f6);border-radius:3px;
+animation:p 1.6s ease-in-out infinite alternate}
+.info{font-size:11px;color:#334155;text-align:center;line-height:1.7}
+.badge{display:inline-block;background:#1e293b;color:#60a5fa;padding:2px 10px;border-radius:4px;
+font-size:10px;font-weight:700;margin-top:6px}
+@keyframes p{from{transform:scaleX(.5);transform-origin:left}to{transform:scaleX(1);transform-origin:left}}
+</style></head><body>
+<div class="logo">F</div><h1>FactureStock</h1>
+<div class="sub">Démarrage du serveur intégré...</div>
+<div class="bar"><div class="fill"></div></div>
+<div class="info">Standalone · Node.js intégré · Aucune installation requise<br>
+<span class="badge">Windows x64 · Port 13000</span></div>
+</body></html>`)
+  return w
 }
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   const localIP = getLocalIP()
-
   try {
     let splash
     if (!IS_DEV) {
@@ -293,50 +241,28 @@ app.whenReady().then(async () => {
       await startNextServer()
       splash.close()
     }
-
     createTray(localIP)
     createWindow(localIP)
-
-    // Show network info dialog on first launch (production only)
     if (!IS_DEV) {
       setTimeout(() => {
-        if (mainWindow) {
-          dialog.showMessageBox(mainWindow, {
-            type: 'info',
-            title: 'FactureStock — Serveur démarré ✓',
-            message: '✓ FactureStock est actif !',
-            detail:
-              `Ce PC (serveur) :\nhttp://localhost:${PORT}\n\n` +
-              `Autres PC du réseau local :\nhttp://${localIP}:${PORT}\n\n` +
-              `Sur chaque autre PC, ouvrez Chrome ou Edge et entrez cette adresse.\n\n` +
-              `Note : Node.js est intégré — aucune installation requise sur les autres PC.`,
-            buttons: ['Compris'],
-            defaultId: 0,
-          })
-        }
+        if (mainWindow) dialog.showMessageBox(mainWindow, {
+          type: 'info', title: 'FactureStock — Serveur démarré ✓',
+          message: '✓ FactureStock est actif !',
+          detail:
+            `Ce PC :\nhttp://localhost:${PORT}\n\n` +
+            `Autres PC du réseau :\nhttp://${localIP}:${PORT}\n\n` +
+            `Ouvrez Chrome ou Edge sur les autres PC et tapez cette adresse.\n` +
+            `Le port 13000 a été ouvert automatiquement dans le pare-feu Windows.`,
+          buttons: ['Compris'],
+        })
       }, 1500)
     }
-
   } catch (err) {
-    dialog.showErrorBox('Erreur de démarrage — FactureStock', String(err))
+    dialog.showErrorBox('FactureStock — Erreur', String(err))
     app.quit()
   }
 })
 
-// Keep app running in tray when window is closed (server stays active)
-app.on('window-all-closed', () => {
-  // Do NOT quit — keep running in system tray so the server stays alive
-  // Other PCs can still connect even if the window is closed
-})
-
-app.on('before-quit', () => {
-  if (nextServer) {
-    nextServer.kill('SIGTERM')
-    nextServer = null
-  }
-})
-
-// Re-open window when clicking app icon (macOS)
-app.on('activate', () => {
-  if (!mainWindow) createWindow(getLocalIP())
-})
+app.on('window-all-closed', () => { /* keep in tray */ })
+app.on('before-quit', () => { if (nextServer) { nextServer.kill('SIGTERM'); nextServer = null } })
+app.on('activate', () => { if (!mainWindow) createWindow(getLocalIP()) })

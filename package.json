@@ -20,8 +20,9 @@
     "db:studio": "drizzle-kit studio",
     "db:init": "node --import tsx db/migrate.ts",
     "electron:dev": "concurrently \"pnpm dev\" \"wait-on http://localhost:13000 && electron .\"",
-    "electron:build": "pnpm build && pnpm db:init && electron-builder --win --x64",
-    "electron:build:dir": "pnpm build && pnpm db:init && electron-builder --win --x64 --dir",
+    "electron:build": "pnpm build && node scripts/post-build.js && pnpm db:init && electron-builder --win --x64",
+    "electron:build:dir": "pnpm build && node scripts/post-build.js && pnpm db:init && electron-builder --win --x64 --dir",
+    "postbuild": "node scripts/post-build.js",
     "build:worker": "opennextjs-cloudflare build",
     "preview": "opennextjs-cloudflare build && wrangler dev",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv env.d.ts"
@@ -118,7 +119,10 @@
     "asarUnpack": [
       "node_modules/better-sqlite3/**/*",
       "node_modules/bindings/**/*",
-      "node_modules/file-uri-to-path/**/*"
+      "node_modules/file-uri-to-path/**/*",
+      ".next/standalone/node_modules/better-sqlite3/**/*",
+      ".next/standalone/node_modules/bindings/**/*",
+      ".next/standalone/node_modules/file-uri-to-path/**/*"
     ],
     "directories": {
       "output": "dist-electron",
@@ -126,15 +130,28 @@
     },
     "files": [
       "electron/**/*",
-      ".next/**/*",
       "public/**/*",
       "package.json",
-      "next.config.ts",
-      "node_modules/**/*",
+      ".next/standalone/**/*",
+      ".next/static/**/*",
+      "node_modules/better-sqlite3/**/*",
+      "node_modules/bindings/**/*",
+      "node_modules/file-uri-to-path/**/*",
       "!node_modules/.cache/**/*",
-      "!node_modules/.pnpm/**/.modules.yaml",
+      "!.next/standalone/.next/cache/**/*",
       "!**/*.ts",
-      "!**/*.map"
+      "!**/*.map",
+      "!**/*.md"
+    ],
+    "extraFiles": [
+      {
+        "from": ".next/standalone/.next/static",
+        "to": "resources/app.asar.unpacked/.next/static"
+      },
+      {
+        "from": "public",
+        "to": "resources/app.asar.unpacked/public"
+      }
     ],
     "win": {
       "target": [
