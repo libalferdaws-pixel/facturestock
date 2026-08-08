@@ -13,7 +13,12 @@ let _db: ReturnType<typeof drizzle> | null = null
 
 export function getDb() {
   if (!_db) {
-    const sqlite = new Database(DB_PATH)
+    // BETTER_SQLITE3_BINDING permet de pointer vers le binaire natif exact
+    // (utile en mode Electron standalone où le .node est dans app.asar.unpacked)
+    const nativeBinding = process.env.BETTER_SQLITE3_BINDING || undefined
+    const sqlite = nativeBinding
+      ? new Database(DB_PATH, { nativeBinding })
+      : new Database(DB_PATH)
     sqlite.pragma('journal_mode = WAL')
     sqlite.pragma('foreign_keys = ON')
     _db = drizzle(sqlite, { schema })

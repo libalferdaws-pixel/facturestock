@@ -39,6 +39,12 @@ jobs:
         run: node scripts/post-build.js
         shell: cmd
 
+      - name: Rebuild better-sqlite3 for Electron inside standalone
+        run: node scripts/rebuild-sqlite-standalone.js
+        shell: cmd
+        env:
+          npm_config_msvs_version: '2022'
+
       - name: Build Electron installer (.exe)
         run: pnpm exec electron-builder --win --x64
         shell: cmd

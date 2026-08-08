@@ -12,7 +12,10 @@ export async function runMigration() {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
     const DB_PATH = path.join(DATA_DIR, 'facturestock.db')
 
-    const sqlite = new Database(DB_PATH)
+    const nativeBinding = process.env.BETTER_SQLITE3_BINDING || undefined
+    const sqlite = nativeBinding
+      ? new Database(DB_PATH, { nativeBinding })
+      : new Database(DB_PATH)
     sqlite.pragma('journal_mode = WAL')
     sqlite.pragma('foreign_keys = ON')
 
