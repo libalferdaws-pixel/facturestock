@@ -20,7 +20,8 @@
     "db:studio": "drizzle-kit studio",
     "db:init": "node --import tsx db/migrate.ts",
     "electron:dev": "concurrently \"pnpm dev\" \"wait-on http://localhost:13000 && electron .\"",
-    "electron:build": "pnpm build && electron-builder --win --x64",
+    "electron:build": "pnpm build && pnpm db:init && electron-builder --win --x64",
+    "electron:build:dir": "pnpm build && pnpm db:init && electron-builder --win --x64 --dir",
     "build:worker": "opennextjs-cloudflare build",
     "preview": "opennextjs-cloudflare build && wrangler dev",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv env.d.ts"
@@ -113,42 +114,38 @@
     "appId": "ma.facturestock.app",
     "productName": "FactureStock",
     "copyright": "Copyright © 2025 FactureStock",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*",
+      "node_modules/bindings/**/*",
+      "node_modules/file-uri-to-path/**/*"
+    ],
     "directories": {
-      "output": "dist-electron"
+      "output": "dist-electron",
+      "buildResources": "build-resources"
     },
     "files": [
       "electron/**/*",
       ".next/**/*",
       "public/**/*",
-      "node_modules/**/*",
       "package.json",
       "next.config.ts",
-      "data/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": ".",
-        "to": "app",
-        "filter": [
-          ".next/**/*",
-          "public/**/*",
-          "node_modules/**/*",
-          "package.json",
-          "next.config.ts"
-        ]
-      }
+      "node_modules/**/*",
+      "!node_modules/.cache/**/*",
+      "!node_modules/.pnpm/**/.modules.yaml",
+      "!**/*.ts",
+      "!**/*.map"
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64"
-          ]
+          "arch": ["x64"]
         }
       ],
       "icon": "public/icon.ico",
-      "artifactName": "FactureStock-Setup-${version}.exe"
+      "artifactName": "FactureStock-Setup-${version}.exe",
+      "requestedExecutionLevel": "asInvoker"
     },
     "nsis": {
       "oneClick": false,
@@ -159,13 +156,19 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "FactureStock",
-      "license": "LICENSE.md",
-      "language": "1036"
+      "language": "1036",
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false,
+      "include": "build-resources/installer.nsh"
     },
     "linux": {
       "target": "AppImage",
       "icon": "public/icon.png",
       "category": "Office"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.business"
     }
   }
 }
