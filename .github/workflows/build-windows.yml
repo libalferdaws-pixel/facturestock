@@ -36,10 +36,6 @@ jobs:
         run: node scripts/post-build.js
         shell: cmd
 
-      - name: Init SQLite database
-        run: pnpm db:init
-        shell: cmd
-
       - name: Build Electron installer (.exe)
         run: pnpm exec electron-builder --win --x64
         shell: cmd
