@@ -13,44 +13,49 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 22
+      - name: Setup Node.js 22 with pnpm cache
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: '10'
-
-      - name: Install Visual C++ Build Tools (for better-sqlite3)
+      - name: Enable corepack and install pnpm
         run: |
-          choco install visualstudio2022buildtools --package-parameters "--add Microsoft.VisualStudio.Workload.VCTools" -y
-        shell: powershell
+          npm install -g pnpm@10
+          pnpm --version
+        shell: cmd
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
+        shell: cmd
 
-      - name: Build Next.js (standalone)
+      - name: Build Next.js standalone
         run: pnpm build
+        shell: cmd
 
       - name: Copy static assets into standalone
         run: node scripts/post-build.js
+        shell: cmd
 
       - name: Init SQLite database
         run: pnpm db:init
+        shell: cmd
 
       - name: Build Electron installer (.exe)
         run: pnpm exec electron-builder --win --x64
+        shell: cmd
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List dist-electron
+        run: dir dist-electron
+        shell: cmd
 
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
         with:
           name: FactureStock-Windows-EXE
           path: dist-electron/*.exe
-          retention-days: 30
+          retention-days: 90
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -60,12 +65,12 @@ jobs:
           body: |
             ## FactureStock — Installateur Windows Standalone
 
-            ### Télécharger
-            👇 Cliquer sur **FactureStock-Setup-1.0.0.exe** ci-dessous
+            ### ⬇️ Télécharger
+            Cliquer sur **FactureStock-Setup-1.0.0.exe** ci-dessous
 
-            ### Installation
+            ### Installation (PC serveur)
             1. Double-cliquer sur le `.exe`
-            2. Suivre l'assistant d'installation
+            2. Suivre l'assistant → Installer
             3. Lancer FactureStock depuis le Bureau
 
             ### Connexion par défaut
@@ -73,10 +78,11 @@ jobs:
             - Mot de passe : `admin123`
 
             ### Accès réseau (autres PC)
-            L'adresse réseau s'affiche au démarrage — ouvrir Chrome sur les autres PC et taper cette adresse.
+            L'adresse réseau s'affiche au démarrage.
+            Ouvrir Chrome sur les autres PC et taper cette adresse.
 
             ---
-            ✅ **Standalone** — Node.js intégré, aucune installation requise
+            ✅ **Standalone** — Node.js intégré, aucune installation requise sur le PC cible
           files: dist-electron/*.exe
           draft: false
           prerelease: false
