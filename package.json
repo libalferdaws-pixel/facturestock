@@ -122,10 +122,7 @@
     "asarUnpack": [
       "node_modules/better-sqlite3/**/*",
       "node_modules/bindings/**/*",
-      "node_modules/file-uri-to-path/**/*",
-      ".next/standalone/node_modules/better-sqlite3/**/*",
-      ".next/standalone/node_modules/bindings/**/*",
-      ".next/standalone/node_modules/file-uri-to-path/**/*"
+      "node_modules/file-uri-to-path/**/*"
     ],
     "directories": {
       "output": "dist-electron",
@@ -133,27 +130,23 @@
     },
     "files": [
       "electron/**/*",
-      "public/**/*",
       "package.json",
-      ".next/standalone/**/*",
-      ".next/static/**/*",
       "node_modules/better-sqlite3/**/*",
       "node_modules/bindings/**/*",
       "node_modules/file-uri-to-path/**/*",
       "!node_modules/.cache/**/*",
-      "!.next/standalone/.next/cache/**/*",
       "!**/*.ts",
-      "!**/*.map",
-      "!**/*.md"
+      "!**/*.map"
     ],
-    "extraFiles": [
+    "extraResources": [
       {
-        "from": ".next/standalone/.next/static",
-        "to": "resources/app.asar.unpacked/.next/static"
+        "from": ".next/standalone",
+        "to": "standalone",
+        "filter": ["**/*", "!**/*.map", "!.next/cache/**/*"]
       },
       {
         "from": "public",
-        "to": "resources/app.asar.unpacked/public"
+        "to": "standalone/public"
       }
     ],
     "win": {

@@ -25,36 +25,40 @@ function getLocalIP() {
 
 // ─── Start Next.js standalone server ─────────────────────────────────────────
 //
-// next build --output standalone produces:
-//   .next/standalone/server.js      ← minimal Node.js HTTP server, no node_modules needed
-//   .next/standalone/node_modules/  ← only runtime deps (auto-copied by Next.js)
-//   .next/standalone/.next/         ← server chunks
-//
-// We also copy into standalone/:
-//   .next/static/   → .next/standalone/.next/static/   (static assets)
-//   public/         → .next/standalone/public/          (public files)
-//
-// Electron's own Node.js runtime (process.execPath) runs server.js directly.
-// Zero external Node.js installation needed on the Windows target machine.
+// Structure dans le .exe installé :
+//   resources/
+//     standalone/          ← extraResources depuis .next/standalone/
+//       server.js
+//       node_modules/
+//       .next/
+//     app.asar             ← electron/main.js + electron/preload.js uniquement
+//     app.asar.unpacked/
+//       node_modules/better-sqlite3/   ← binaire natif .node
 //
 function startNextServer() {
   return new Promise((resolve, reject) => {
     if (IS_DEV) { resolve(); return }
 
-    // In packaged asar the standalone dir is at resources/app.asar/.next/standalone
-    // better-sqlite3 .node binary is in asarUnpack so it's outside the asar
-    const standaloneDir = path.join(process.resourcesPath, 'app.asar', '.next', 'standalone')
+    // Le standalone est dans resources/standalone/ (extraResources)
+    const standaloneDir = path.join(process.resourcesPath, 'standalone')
     const serverScript = path.join(standaloneDir, 'server.js')
 
-    // Persistent user data directory (survives app updates)
+    // Données persistantes dans AppData/Roaming/FactureStock/
     const dataDir = path.join(app.getPath('userData'), 'FactureStock')
     if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true })
 
-    // Initialize database on first run
-    const dbPath = path.join(dataDir, 'facturestock.db')
-    const migrateScript = path.join(process.resourcesPath, 'app.asar', 'db', 'migrate-standalone.js')
+    // Le binaire better-sqlite3 est dans app.asar.unpacked (asarUnpack)
+    const sqliteBinary = path.join(
+      process.resourcesPath,
+      'app.asar.unpacked',
+      'node_modules',
+      'better-sqlite3',
+      'build',
+      'Release',
+      'better_sqlite3.node'
+    )
 
-    // Environment for the server process
+    // Variables d'environnement pour server.js
     const serverEnv = {
       ...process.env,
       DATA_DIR: dataDir,
@@ -62,34 +66,32 @@ function startNextServer() {
       HOSTNAME: '0.0.0.0',
       NODE_ENV: 'production',
       NEXT_TELEMETRY_DISABLED: '1',
-      // Point better-sqlite3 to the unpacked native binary
-      // electron-builder asarUnpack copies it to app.asar.unpacked/
-      BETTER_SQLITE3_PATH: path.join(
-        process.resourcesPath,
-        'app.asar.unpacked',
-        'node_modules',
-        'better-sqlite3',
-        'build',
-        'Release',
-        'better_sqlite3.node'
-      ),
+      BETTER_SQLITE3_PATH: sqliteBinary,
     }
 
-    console.log('[FactureStock] Standalone dir:', standaloneDir)
-    console.log('[FactureStock] Server script:', serverScript)
-    console.log('[FactureStock] Data dir:', dataDir)
-    console.log('[FactureStock] Node binary:', process.execPath)
+    console.log('[FactureStock] standaloneDir :', standaloneDir)
+    console.log('[FactureStock] serverScript  :', serverScript)
+    console.log('[FactureStock] dataDir       :', dataDir)
+    console.log('[FactureStock] execPath      :', process.execPath)
+    console.log('[FactureStock] sqliteBinary  :', sqliteBinary)
+    console.log('[FactureStock] serverScript exists:', fs.existsSync(serverScript))
 
     if (!fs.existsSync(serverScript)) {
+      // Lister le dossier resources pour debug
+      try {
+        const items = fs.readdirSync(process.resourcesPath)
+        console.log('[FactureStock] resources/ contient:', items.join(', '))
+      } catch(e) { console.log('[FactureStock] Cannot list resources:', e.message) }
+
       reject(new Error(
-        `server.js introuvable dans:\n${standaloneDir}\n\n` +
-        `Assurez-vous d'avoir lancé: pnpm build\n` +
-        `(next build génère .next/standalone/server.js)`
+        `server.js introuvable !\n\nChemin attendu :\n${serverScript}\n\n` +
+        `Contenu de resources/ :\n` +
+        ((() => { try { return fs.readdirSync(process.resourcesPath).join('\n') } catch(e) { return e.message } })())
       ))
       return
     }
 
-    // Run the standalone server with Electron's built-in Node.js
+    // Lancer server.js avec le Node.js intégré à Electron (process.execPath)
     nextServer = spawn(process.execPath, [serverScript], {
       cwd: standaloneDir,
       env: serverEnv,
@@ -105,23 +107,32 @@ function startNextServer() {
       const msg = d.toString().trim()
       if (msg) console.error('[Next err]', msg)
     })
-    nextServer.on('error', err => { console.error('[spawn error]', err); reject(err) })
+    nextServer.on('error', err => {
+      console.error('[spawn error]', err)
+      reject(err)
+    })
     nextServer.on('exit', code => {
-      if (code !== 0 && code !== null) console.error('[Next exit code]', code)
+      if (code !== 0 && code !== null) {
+        console.error('[Next exit]', code)
+      }
     })
 
+    // Attendre que /api/health réponde 200 (max 90 secondes)
     waitForServer(resolve, reject, 90)
   })
 }
 
 function waitForServer(resolve, reject, retries) {
   if (retries <= 0) {
-    reject(new Error('Le serveur Next.js n\'a pas démarré (timeout 90s).\nPort 13000 peut-être occupé.'))
+    reject(new Error(
+      'Le serveur Next.js n\'a pas démarré après 90 secondes.\n' +
+      'Le port 13000 est peut-être occupé par un autre programme.'
+    ))
     return
   }
   http.get(`http://localhost:${PORT}/api/health`, res => {
     if (res.statusCode === 200) {
-      console.log('[FactureStock] Server ready ✓')
+      console.log('[FactureStock] ✓ Serveur prêt sur port', PORT)
       resolve()
     } else {
       setTimeout(() => waitForServer(resolve, reject, retries - 1), 1000)
@@ -131,12 +142,12 @@ function waitForServer(resolve, reject, retries) {
   })
 }
 
-// ─── Tray ─────────────────────────────────────────────────────────────────────
+// ─── System Tray ──────────────────────────────────────────────────────────────
 function createTray(localIP) {
   let icon
   try {
     const iconPath = app.isPackaged
-      ? path.join(process.resourcesPath, 'app.asar', 'public', 'icon.ico')
+      ? path.join(process.resourcesPath, 'standalone', 'public', 'icon.ico')
       : path.join(__dirname, '..', 'public', 'icon.ico')
     icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty()
   } catch { icon = nativeImage.createEmpty() }
@@ -148,40 +159,76 @@ function createTray(localIP) {
     { label: `📍 http://localhost:${PORT}`, enabled: false },
     { label: `🌐 http://${localIP}:${PORT}`, enabled: false },
     { type: 'separator' },
-    { label: 'Ouvrir', click: () => mainWindow ? (mainWindow.show(), mainWindow.focus()) : createWindow(localIP) },
     {
-      label: 'Copier adresse réseau', click: () => {
+      label: 'Ouvrir',
+      click: () => mainWindow ? (mainWindow.show(), mainWindow.focus()) : createWindow(localIP)
+    },
+    {
+      label: 'Copier adresse réseau',
+      click: () => {
         clipboard.writeText(`http://${localIP}:${PORT}`)
-        dialog.showMessageBox({ message: `Copié !\nhttp://${localIP}:${PORT}`, type: 'info', title: 'FactureStock' })
+        dialog.showMessageBox({
+          message: `Copié !\nhttp://${localIP}:${PORT}`,
+          type: 'info',
+          title: 'FactureStock'
+        })
       }
     },
     { type: 'separator' },
-    { label: 'Quitter', click: () => { if (nextServer) nextServer.kill(); app.quit() } },
+    {
+      label: 'Quitter',
+      click: () => { if (nextServer) nextServer.kill(); app.quit() }
+    },
   ])
   tray.setContextMenu(menu)
   tray.setToolTip(`FactureStock — http://${localIP}:${PORT}`)
-  tray.on('double-click', () => mainWindow ? (mainWindow.show(), mainWindow.focus()) : createWindow(localIP))
+  tray.on('double-click', () => mainWindow
+    ? (mainWindow.show(), mainWindow.focus())
+    : createWindow(localIP)
+  )
 }
 
-// ─── Main window ──────────────────────────────────────────────────────────────
+// ─── Fenêtre principale ───────────────────────────────────────────────────────
 function createWindow(localIP) {
   const ip = localIP || getLocalIP()
   mainWindow = new BrowserWindow({
-    width: 1300, height: 860, minWidth: 960, minHeight: 640,
+    width: 1300,
+    height: 860,
+    minWidth: 960,
+    minHeight: 640,
     title: 'FactureStock',
     webPreferences: {
-      nodeIntegration: false, contextIsolation: true,
+      nodeIntegration: false,
+      contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
     },
-    show: false, backgroundColor: '#f8fafc', autoHideMenuBar: true,
+    show: false,
+    backgroundColor: '#f8fafc',
+    autoHideMenuBar: true,
   })
   mainWindow.removeMenu()
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' } })
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url)
+    return { action: 'deny' }
+  })
+
+  // En cas d'erreur de chargement, réessayer
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+    console.error('[window] did-fail-load', errorCode, errorDescription)
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.loadURL(`http://localhost:${PORT}`)
+      }
+    }, 2000)
+  })
+
   mainWindow.loadURL(`http://localhost:${PORT}`)
   mainWindow.once('ready-to-show', () => {
-    mainWindow.show(); mainWindow.focus()
+    mainWindow.show()
+    mainWindow.focus()
     if (!IS_DEV) {
       setTimeout(() => {
+        if (!mainWindow || mainWindow.isDestroyed()) return
         mainWindow.webContents.executeJavaScript(`
           (() => {
             if (document.getElementById('fs-net')) return
@@ -200,11 +247,17 @@ function createWindow(localIP) {
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
-// ─── Splash ───────────────────────────────────────────────────────────────────
+// ─── Splash screen ────────────────────────────────────────────────────────────
 function createSplash() {
   const w = new BrowserWindow({
-    width: 440, height: 300, frame: false, alwaysOnTop: true,
-    backgroundColor: '#0f172a', resizable: false, center: true, skipTaskbar: true,
+    width: 440,
+    height: 300,
+    frame: false,
+    alwaysOnTop: true,
+    backgroundColor: '#0f172a',
+    resizable: false,
+    center: true,
+    skipTaskbar: true,
   })
   w.loadURL(`data:text/html;charset=utf-8,<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>*{margin:0;padding:0;box-sizing:border-box}
@@ -231,7 +284,7 @@ font-size:10px;font-weight:700;margin-top:6px}
   return w
 }
 
-// ─── App lifecycle ────────────────────────────────────────────────────────────
+// ─── Cycle de vie ─────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   const localIP = getLocalIP()
   try {
@@ -245,8 +298,10 @@ app.whenReady().then(async () => {
     createWindow(localIP)
     if (!IS_DEV) {
       setTimeout(() => {
-        if (mainWindow) dialog.showMessageBox(mainWindow, {
-          type: 'info', title: 'FactureStock — Serveur démarré ✓',
+        if (!mainWindow || mainWindow.isDestroyed()) return
+        dialog.showMessageBox(mainWindow, {
+          type: 'info',
+          title: 'FactureStock — Serveur démarré ✓',
           message: '✓ FactureStock est actif !',
           detail:
             `Ce PC :\nhttp://localhost:${PORT}\n\n` +
@@ -258,11 +313,13 @@ app.whenReady().then(async () => {
       }, 1500)
     }
   } catch (err) {
-    dialog.showErrorBox('FactureStock — Erreur', String(err))
+    dialog.showErrorBox('FactureStock — Erreur de démarrage', String(err))
     app.quit()
   }
 })
 
-app.on('window-all-closed', () => { /* keep in tray */ })
-app.on('before-quit', () => { if (nextServer) { nextServer.kill('SIGTERM'); nextServer = null } })
+app.on('window-all-closed', () => { /* garder dans le tray */ })
+app.on('before-quit', () => {
+  if (nextServer) { nextServer.kill('SIGTERM'); nextServer = null }
+})
 app.on('activate', () => { if (!mainWindow) createWindow(getLocalIP()) })
