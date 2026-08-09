@@ -16,10 +16,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      # Electron 43 embeds Node 24 — build with Node 22 (closest LTS)
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install pnpm
         run: npm install -g pnpm@10
@@ -39,11 +40,9 @@ jobs:
         run: node scripts/post-build.js
         shell: cmd
 
-      - name: Rebuild better-sqlite3 for Electron inside standalone
-        run: node scripts/rebuild-sqlite-standalone.js
+      - name: Bundle Node.exe for standalone server
+        run: node scripts/bundle-node.js
         shell: cmd
-        env:
-          npm_config_msvs_version: '2022'
 
       - name: Build Electron installer (.exe)
         run: pnpm exec electron-builder --win --x64
