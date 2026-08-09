@@ -16,7 +16,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Electron 43 embeds Node 24 — build with Node 22 (closest LTS)
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
@@ -38,10 +37,6 @@ jobs:
 
       - name: Copy static assets into standalone
         run: node scripts/post-build.js
-        shell: cmd
-
-      - name: Bundle Node.exe for standalone server
-        run: node scripts/bundle-node.js
         shell: cmd
 
       - name: Build Electron installer (.exe)
