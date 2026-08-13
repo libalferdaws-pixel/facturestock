@@ -143,10 +143,6 @@
         "from": ".next/standalone",
         "to": "standalone",
         "filter": ["**/*", "!**/*.map", "!.next/cache/**/*"]
-      },
-      {
-        "from": "public",
-        "to": "standalone/public"
       }
     ],
     "win": {

@@ -4,9 +4,8 @@
  *
  * 1. Copie .next/static → .next/standalone/.next/static  (assets CSS/JS)
  * 2. Copie public/ → .next/standalone/public/             (images, fonts)
- * 3. Copie better-sqlite3 de node_modules → standalone/node_modules
- *    (electron-builder reconstruit le .node pour Electron dans node_modules/
- *     via @electron/rebuild — on s'assure que standalone en a une copie)
+ * 3. Copie better-sqlite3 + bindings + file-uri-to-path → standalone/node_modules
+ * 4. Copie next/ complet → standalone/node_modules/next   (requis par server.js standalone)
  */
 
 const fs = require('fs')
@@ -43,34 +42,46 @@ if (!fs.existsSync(serverJs)) {
 }
 console.log('  ✓ server.js found')
 
-// 4. Copier better-sqlite3 complet de node_modules vers standalone/node_modules
-//    electron-builder reconstruira le .node via @electron/rebuild pour l'ABI Electron
-//    La copie garantit que standalone a bien le module avec son .node
-const sqliteSrc  = path.join(root, 'node_modules', 'better-sqlite3')
-const sqliteDest = path.join(root, '.next', 'standalone', 'node_modules', 'better-sqlite3')
-const bindingsSrc  = path.join(root, 'node_modules', 'bindings')
-const bindingsDest = path.join(root, '.next', 'standalone', 'node_modules', 'bindings')
-const furiSrc  = path.join(root, 'node_modules', 'file-uri-to-path')
-const furiDest = path.join(root, '.next', 'standalone', 'node_modules', 'file-uri-to-path')
-
-if (fs.existsSync(sqliteSrc)) {
-  copyDir(sqliteSrc, sqliteDest)
-  console.log('  ✓ better-sqlite3 copied to standalone/node_modules')
-}
-if (fs.existsSync(bindingsSrc)) {
-  copyDir(bindingsSrc, bindingsDest)
-  console.log('  ✓ bindings copied to standalone/node_modules')
-}
-if (fs.existsSync(furiSrc)) {
-  copyDir(furiSrc, furiDest)
-  console.log('  ✓ file-uri-to-path copied to standalone/node_modules')
+// 4. Dépendances natives vers standalone/node_modules
+const deps = [
+  ['better-sqlite3',   'better-sqlite3'],
+  ['bindings',         'bindings'],
+  ['file-uri-to-path', 'file-uri-to-path'],
+]
+for (const [name, dir] of deps) {
+  const src  = path.join(root, 'node_modules', dir)
+  const dest = path.join(root, '.next', 'standalone', 'node_modules', dir)
+  if (fs.existsSync(src)) {
+    copyDir(src, dest)
+    console.log(`  ✓ ${name} copied to standalone/node_modules`)
+  } else {
+    console.log(`  [skip] ${name} not in node_modules`)
+  }
 }
 
-// 5. Afficher contenu de standalone/node_modules
+// 5. Copier 'next' dans standalone/node_modules
+// server.js standalone fait require('next/...') — il faut que next soit résolvable
+// depuis standalone/node_modules pour que node.exe (avec cwd=standalone) le trouve
+const nextSrc  = path.join(root, 'node_modules', 'next')
+const nextDest = path.join(root, '.next', 'standalone', 'node_modules', 'next')
+if (fs.existsSync(nextSrc)) {
+  if (!fs.existsSync(nextDest)) {
+    copyDir(nextSrc, nextDest)
+    console.log('  ✓ next copied to standalone/node_modules')
+  } else {
+    console.log('  ✓ next already in standalone/node_modules (skip)')
+  }
+} else {
+  console.warn('  ⚠ next not found in node_modules!')
+}
+
+// 6. Afficher contenu de standalone/node_modules
 const standaloneNM = path.join(root, '.next', 'standalone', 'node_modules')
 if (fs.existsSync(standaloneNM)) {
-  const count = fs.readdirSync(standaloneNM).length
-  console.log(`  ✓ standalone/node_modules: ${count} packages`)
+  const pkgs = fs.readdirSync(standaloneNM)
+  console.log(`  ✓ standalone/node_modules: ${pkgs.length} packages`)
+  if (pkgs.includes('next')) console.log('  ✓ next présent dans standalone/node_modules')
+  else console.error('  ✗ next ABSENT de standalone/node_modules !')
 }
 
 console.log('[post-build] ✓ Done. Ready for electron-builder.')

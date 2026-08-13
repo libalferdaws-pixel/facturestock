@@ -39,6 +39,22 @@ jobs:
         run: node scripts/post-build.js
         shell: cmd
 
+      - name: Rebuild better-sqlite3 for Electron ABI
+        run: |
+          pnpm exec electron-rebuild -f -w better-sqlite3 --module-dir .
+          echo [rebuild] better-sqlite3 rebuilt for Electron ABI
+        shell: cmd
+        env:
+          npm_config_msvs_version: '2022'
+
+      - name: Copy Electron-ABI better_sqlite3.node into standalone
+        run: node scripts/copy-sqlite-binding.js
+        shell: cmd
+
+      - name: Bundle node.exe (Node 24) into standalone
+        run: node scripts/bundle-node.js
+        shell: cmd
+
       - name: Build Electron installer (.exe)
         run: pnpm exec electron-builder --win --x64
         shell: cmd

@@ -3,13 +3,14 @@ const path = require('path')
 const http = require('http')
 const os = require('os')
 const fs = require('fs')
+const { spawn } = require('child_process')
 
 const PORT = 13000
 const IS_DEV = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 let mainWindow
 let tray
-let nextServer = null  // http.Server instance (in-process)
+let nextProcess = null  // child_process.ChildProcess
 
 // ─── Local IP ─────────────────────────────────────────────────────────────────
 function getLocalIP() {
@@ -22,12 +23,26 @@ function getLocalIP() {
   return 'localhost'
 }
 
-// ─── Démarrer Next.js IN-PROCESS ─────────────────────────────────────────────
-//
-// On importe next directement dans le processus Electron.
-// Plus de spawn, plus de problème d'ABI, plus d'EPIPE.
-// Le serveur HTTP tourne dans le même processus que Electron.
-//
+// ─── Attendre que le serveur réponde ─────────────────────────────────────────
+function waitForServer(url, timeout = 60000) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now()
+    function tryOnce() {
+      http.get(url, res => {
+        if (res.statusCode < 500) return resolve()
+        res.resume()
+        retry()
+      }).on('error', retry)
+    }
+    function retry() {
+      if (Date.now() - start > timeout) return reject(new Error(`Timeout: serveur non disponible après ${timeout/1000}s`))
+      setTimeout(tryOnce, 500)
+    }
+    tryOnce()
+  })
+}
+
+// ─── Démarrer Next.js via node.exe bundlé ────────────────────────────────────
 async function startNextServer() {
   if (IS_DEV) return
 
@@ -35,108 +50,77 @@ async function startNextServer() {
   const standaloneDir = path.join(process.resourcesPath, 'standalone')
 
   if (!fs.existsSync(standaloneDir)) {
-    throw new Error(`Dossier standalone introuvable :\n${standaloneDir}\n\nContenu de resources/ :\n` +
-      fs.readdirSync(process.resourcesPath).join('\n'))
+    const contents = fs.existsSync(process.resourcesPath)
+      ? fs.readdirSync(process.resourcesPath).join('\n')
+      : '(resourcesPath introuvable)'
+    throw new Error(`Dossier standalone introuvable:\n${standaloneDir}\n\nContenu resources/:\n${contents}`)
   }
 
   // Données persistantes (AppData/Roaming/FactureStock/)
   const dataDir = path.join(app.getPath('userData'), 'FactureStock')
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true })
 
-  // Configurer les variables d'environnement AVANT d'importer next
-  process.env.DATA_DIR = dataDir
-  process.env.PORT = String(PORT)
-  process.env.HOSTNAME = '0.0.0.0'
-  process.env.NODE_ENV = 'production'
-  process.env.NEXT_TELEMETRY_DISABLED = '1'
+  const serverJs  = path.join(standaloneDir, 'server.js')
+  const nodeExe   = path.join(standaloneDir, 'node.exe')
+  const nodeModules = path.join(standaloneDir, 'node_modules')
 
-  // better-sqlite3 : le binaire dans app.asar.unpacked a été recompilé par
-  // @electron/rebuild pour l'ABI exact d'Electron 43.
-  // On le copie dans standalone/node_modules/better-sqlite3/build/Release/
-  // pour que require('better-sqlite3') le trouve automatiquement.
-  const sqliteUnpacked = path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node')
-  const sqliteStandaloneDir = path.join(standaloneDir, 'node_modules', 'better-sqlite3', 'build', 'Release')
-  const sqliteStandalone = path.join(sqliteStandaloneDir, 'better_sqlite3.node')
-
-  if (fs.existsSync(sqliteUnpacked)) {
-    try {
-      fs.mkdirSync(sqliteStandaloneDir, { recursive: true })
-      fs.copyFileSync(sqliteUnpacked, sqliteStandalone)
-      console.log('[FactureStock] ✓ better_sqlite3.node copié (ABI Electron) →', sqliteStandalone)
-    } catch(e) {
-      console.warn('[FactureStock] ⚠ Copie better_sqlite3.node échouée:', e.message)
-    }
-  } else {
-    console.warn('[FactureStock] ⚠ better_sqlite3.node unpacked introuvable:', sqliteUnpacked)
+  // Vérifications
+  if (!fs.existsSync(serverJs)) {
+    throw new Error(`server.js introuvable:\n${serverJs}`)
+  }
+  if (!fs.existsSync(nodeExe)) {
+    throw new Error(`node.exe introuvable:\n${nodeExe}\n\nLe bundling node.exe dans le CI a-t-il réussi ?`)
   }
 
-  // Indiquer le binding exact via env var (fallback si copie échoue)
-  const bindingPath = fs.existsSync(sqliteStandalone) ? sqliteStandalone : sqliteUnpacked
-  if (fs.existsSync(bindingPath)) {
-    process.env.BETTER_SQLITE3_BINDING = bindingPath
-    console.log('[FactureStock] BETTER_SQLITE3_BINDING:', bindingPath)
+  // better_sqlite3.node compilé pour Electron (ABI Electron)
+  // electron-rebuild le place dans node_modules/better-sqlite3/build/Release/
+  // copy-sqlite-binding.js le copie dans standalone/node_modules/better-sqlite3/build/Release/
+  const sqliteBinding = path.join(nodeModules, 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node')
+  if (!fs.existsSync(sqliteBinding)) {
+    console.warn('[FactureStock] ⚠ better_sqlite3.node absent de standalone/node_modules, tentative copie depuis app.asar.unpacked...')
+    // Fallback: copier depuis asarUnpack
+    const unpacked = path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node')
+    if (fs.existsSync(unpacked)) {
+      const destDir2 = path.join(nodeModules, 'better-sqlite3', 'build', 'Release')
+      fs.mkdirSync(destDir2, { recursive: true })
+      fs.copyFileSync(unpacked, sqliteBinding)
+      console.log('[FactureStock] ✓ better_sqlite3.node copié depuis asar.unpacked')
+    }
   }
 
   console.log('[FactureStock] standaloneDir:', standaloneDir)
   console.log('[FactureStock] dataDir:', dataDir)
+  console.log('[FactureStock] node.exe:', nodeExe)
+  console.log('[FactureStock] server.js:', serverJs)
 
-  const serverJsPath = path.join(standaloneDir, 'server.js')
-  const standaloneNodeModules = path.join(standaloneDir, 'node_modules')
+  const env = {
+    ...process.env,
+    PORT: String(PORT),
+    HOSTNAME: '0.0.0.0',
+    NODE_ENV: 'production',
+    NEXT_TELEMETRY_DISABLED: '1',
+    DATA_DIR: dataDir,
+    // NODE_PATH force la résolution de 'next' et ses deps depuis standalone/node_modules
+    NODE_PATH: nodeModules,
+  }
 
-  return new Promise((resolve, reject) => {
-    try {
-      // ── 1. chdir vers standaloneDir ─────────────────────────────────────────
-      process.chdir(standaloneDir)
-
-      // ── 2. Patcher Module._resolveFilename ──────────────────────────────────
-      // Electron cherche les modules depuis son propre répertoire.
-      // On intercept toutes les résolutions et on ajoute standaloneDir/node_modules
-      // en tête des chemins de recherche pour 'next' et ses dépendances.
-      const Module = require('module')
-      const _originalResolve = Module._resolveFilename.bind(Module)
-      Module._resolveFilename = function(request, parent, isMain, options) {
-        // Injecter standaloneDir/node_modules dans les chemins de recherche
-        const opts = options ? { ...options } : {}
-        if (!opts.paths) {
-          opts.paths = [standaloneNodeModules, ...(parent && parent.paths ? parent.paths : [])]
-        } else if (!opts.paths.includes(standaloneNodeModules)) {
-          opts.paths = [standaloneNodeModules, ...opts.paths]
-        }
-        return _originalResolve(request, parent, isMain, opts)
-      }
-      console.log('[FactureStock] ✓ Module._resolveFilename patché → résolution depuis', standaloneNodeModules)
-
-      // ── 3. Forcer NODE_PATH (pour les sous-processus éventuels) ────────────
-      process.env.NODE_PATH = standaloneNodeModules
-      Module._initPaths()
-
-      // ── 4. Intercepter server.listen pour récupérer le serveur ─────────────
-      const originalListen = http.Server.prototype.listen
-      http.Server.prototype.listen = function(...args) {
-        http.Server.prototype.listen = originalListen
-        nextServer = this
-        console.log('[FactureStock] Next.js serveur HTTP créé in-process')
-        const cb = typeof args[args.length - 1] === 'function' ? args.pop() : null
-        return originalListen.call(this, PORT, '0.0.0.0', () => {
-          console.log(`[FactureStock] ✓ Serveur prêt sur port ${PORT}`)
-          if (cb) cb()
-          resolve()
-        })
-      }
-
-      // ── 5. Charger server.js — il démarre le serveur ────────────────────────
-      require(serverJsPath)
-
-      // Timeout de sécurité (45s)
-      setTimeout(() => {
-        http.Server.prototype.listen = originalListen
-        reject(new Error(`Timeout: le serveur Next.js n'a pas démarré après 45s.\nstandaloneDir: ${standaloneDir}`))
-      }, 45000)
-
-    } catch (err) {
-      reject(new Error(`Erreur au chargement de server.js:\n${err.message}\n\nStack:\n${err.stack}`))
-    }
+  nextProcess = spawn(nodeExe, [serverJs], {
+    cwd: standaloneDir,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
+
+  nextProcess.stdout.on('data', d => console.log('[next]', d.toString().trimEnd()))
+  nextProcess.stderr.on('data', d => console.error('[next-err]', d.toString().trimEnd()))
+  nextProcess.on('error', err => console.error('[FactureStock] spawn erreur:', err))
+  nextProcess.on('exit', (code, sig) => {
+    console.log(`[FactureStock] next process exit — code=${code} signal=${sig}`)
+    nextProcess = null
+  })
+
+  // Attendre que le serveur HTTP réponde (max 60s)
+  await waitForServer(`http://localhost:${PORT}/api/health`)
+  console.log(`[FactureStock] ✓ Serveur prêt sur port ${PORT}`)
 }
 
 // ─── System Tray ──────────────────────────────────────────────────────────────
@@ -162,7 +146,7 @@ function createTray(localIP) {
       dialog.showMessageBox({ message: `Copié !\nhttp://${localIP}:${PORT}`, type: 'info', title: 'FactureStock' })
     }},
     { type: 'separator' },
-    { label: 'Quitter', click: () => { if (nextServer) nextServer.close(); app.quit() } },
+    { label: 'Quitter', click: () => { if (nextProcess) nextProcess.kill(); app.quit() } },
   ]))
   tray.setToolTip(`FactureStock — http://${localIP}:${PORT}`)
   tray.on('double-click', () => mainWindow ? (mainWindow.show(), mainWindow.focus()) : createWindow(localIP))
@@ -246,5 +230,5 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {})
-app.on('before-quit', () => { if (nextServer) { nextServer.close(); nextServer = null } })
+app.on('before-quit', () => { if (nextProcess) { nextProcess.kill(); nextProcess = null } })
 app.on('activate', () => { if (!mainWindow) createWindow(getLocalIP()) })
