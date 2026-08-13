@@ -80,26 +80,42 @@ async function startNextServer() {
   console.log('[FactureStock] standaloneDir:', standaloneDir)
   console.log('[FactureStock] dataDir:', dataDir)
 
-  // Charger le serveur standalone directement (server.js de Next.js)
-  // server.js exporte un http.Server ou se lance lui-même
-  // On le charge avec require() dans notre processus
   const serverJsPath = path.join(standaloneDir, 'server.js')
+  const standaloneNodeModules = path.join(standaloneDir, 'node_modules')
 
   return new Promise((resolve, reject) => {
     try {
-      // Modifier process.cwd() temporairement pour que next trouve ses fichiers
-      const originalCwd = process.cwd
+      // ── 1. chdir vers standaloneDir ─────────────────────────────────────────
       process.chdir(standaloneDir)
 
-      // Intercepter le server.listen pour récupérer le serveur
+      // ── 2. Patcher Module._resolveFilename ──────────────────────────────────
+      // Electron cherche les modules depuis son propre répertoire.
+      // On intercept toutes les résolutions et on ajoute standaloneDir/node_modules
+      // en tête des chemins de recherche pour 'next' et ses dépendances.
+      const Module = require('module')
+      const _originalResolve = Module._resolveFilename.bind(Module)
+      Module._resolveFilename = function(request, parent, isMain, options) {
+        // Injecter standaloneDir/node_modules dans les chemins de recherche
+        const opts = options ? { ...options } : {}
+        if (!opts.paths) {
+          opts.paths = [standaloneNodeModules, ...(parent && parent.paths ? parent.paths : [])]
+        } else if (!opts.paths.includes(standaloneNodeModules)) {
+          opts.paths = [standaloneNodeModules, ...opts.paths]
+        }
+        return _originalResolve(request, parent, isMain, opts)
+      }
+      console.log('[FactureStock] ✓ Module._resolveFilename patché → résolution depuis', standaloneNodeModules)
+
+      // ── 3. Forcer NODE_PATH (pour les sous-processus éventuels) ────────────
+      process.env.NODE_PATH = standaloneNodeModules
+      Module._initPaths()
+
+      // ── 4. Intercepter server.listen pour récupérer le serveur ─────────────
       const originalListen = http.Server.prototype.listen
       http.Server.prototype.listen = function(...args) {
-        // Restaurer listen immédiatement pour éviter les effets de bord
         http.Server.prototype.listen = originalListen
         nextServer = this
         console.log('[FactureStock] Next.js serveur HTTP créé in-process')
-
-        // Forcer l'écoute sur 0.0.0.0:PORT
         const cb = typeof args[args.length - 1] === 'function' ? args.pop() : null
         return originalListen.call(this, PORT, '0.0.0.0', () => {
           console.log(`[FactureStock] ✓ Serveur prêt sur port ${PORT}`)
@@ -108,14 +124,14 @@ async function startNextServer() {
         })
       }
 
-      // Charger server.js — il va démarrer le serveur
+      // ── 5. Charger server.js — il démarre le serveur ────────────────────────
       require(serverJsPath)
 
-      // Timeout de sécurité
+      // Timeout de sécurité (45s)
       setTimeout(() => {
         http.Server.prototype.listen = originalListen
-        reject(new Error(`Le serveur Next.js n'a pas démarré après 30 secondes.\nstandaloneDir: ${standaloneDir}`))
-      }, 30000)
+        reject(new Error(`Timeout: le serveur Next.js n'a pas démarré après 45s.\nstandaloneDir: ${standaloneDir}`))
+      }, 45000)
 
     } catch (err) {
       reject(new Error(`Erreur au chargement de server.js:\n${err.message}\n\nStack:\n${err.stack}`))
