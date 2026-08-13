@@ -41,7 +41,8 @@ jobs:
 
       - name: Rebuild better-sqlite3 for Electron ABI
         run: |
-          pnpm exec electron-rebuild -f -w better-sqlite3 --module-dir .
+          npm install -g @electron/rebuild
+          electron-rebuild -f -w better-sqlite3 --module-dir .
           echo [rebuild] better-sqlite3 rebuilt for Electron ABI
         shell: cmd
         env:
